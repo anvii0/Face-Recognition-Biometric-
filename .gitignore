@@ -1,0 +1,32 @@
+# secrets / credentials — never commit
+.env
+.env*
+*.pem
+*.key
+.aws/
+credentials*
+
+# biometric data — never commit face images
+eval_data/
+enrolled/
+captures/
+*.jpg
+*.jpeg
+*.png
+!docs/**/*.png
+
+# models (large binaries; fetched by script)
+models/*.onnx
+models/*.pth
+
+# logs / outputs
+logs/
+*.log
+*.jsonl
+eval/out/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
