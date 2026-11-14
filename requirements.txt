@@ -1,0 +1,19 @@
+# Runtime (server). Python 3.12. mediapipe is installed with --no-deps (its declared deps pull
+# opencv-contrib-python, which conflicts with opencv-python-headless) — see scripts/install.sh.
+fastapi==0.162.7
+uvicorn==0.54.0
+websockets==17.4
+starlette==1.10.0
+pydantic==2.14.3
+python-multipart==0.0.33
+onnxruntime==1.32.0
+opencv-python-headless==4.14.0.94
+numpy==2.5.4
+PyYAML==6.0.3
+boto3==1.44.3
+botocore==1.44.3
+certifi==2026.10.23
+absl-py==2.5.1
+flatbuffers==25.12.19
+protobuf==6.33.6
+matplotlib==3.11.2

@@ -1,0 +1,65 @@
+# Decision thresholds. Initial values are UNTUNED placeholders; Phase 3 tunes them on the dev split.
+# Bench "Save to config.yaml" rewrites the `thresholds` block.
+thresholds:
+  t_lo: 0.35        # fused liveness below this -> DENY (presentation attack)
+  t_hi: 0.70        # fused liveness at/above this (and match ok) -> ALLOW
+  t_match: 90.0     # Rekognition similarity (0-100) at/above this -> identity confirmed
+  t_match_lo: 50.0  # similarity below this -> DENY (clearly a different person)
+
+# Liveness fusion. Variant A = MiniFASNet only; B = + FFT/moire cue; C = B + motion cue.
+fusion:
+  default_variant: A
+  moire_lo: 0.30    # moire raw score mapped linearly: <= lo -> 0 spoof evidence, >= hi -> 1
+  moire_hi: 0.60    # (a natural photo measured 0.27; range is a placeholder until Phase 3)
+  w_moire: 0.5      # max liveness penalty from the moire cue
+  motion_ref: 0.02  # non-rigid landmark motion (fraction of inter-eye distance) treated as fully live
+  w_motion: 0.3     # max liveness penalty when no non-rigid motion is observed
+
+# Quality gates (any failure -> REQUEST_VERIFICATION). Amber band = within 25% of the limit.
+quality:
+  min_blur: 60.0          # Laplacian variance of the 112px-wide face crop
+  min_brightness: 60.0    # mean grey level of the face crop (0-255)
+  max_brightness: 210.0
+  min_face_frac: 0.18     # face box height / frame height
+  max_yaw: 0.35           # |nose offset from eye midpoint| / inter-eye distance (~0.35 ~= 25 deg)
+  max_roll_deg: 20.0
+
+detector:
+  score_threshold: 0.7
+  max_side: 640           # frames are downscaled to this before detection
+
+match:
+  provider: rekognition   # rekognition | none
+  region: us-east-1
+  collection: hid-liveness-faces
+  live_interval_s: 1.0    # live mode: at most one CompareFaces call per this many seconds
+  keepalive_s: 120        # keep the Rekognition TLS connection warm (cold call measured ~2.2 s)
+
+# Active challenges (enrollment + verify step-up). Signals: MediaPipe blendshapes (blink/smile), YuNet yaw.
+challenge:
+  timeout_s: 10           # per challenge
+  retries: 1              # a timed-out challenge is replaced by a different random one, once
+  session_timeout_s: 90
+  blink_closed: 0.45      # both eyeBlink blendshapes >= this = eyes closed
+  blink_open: 0.25        # both <= this = eyes open
+  smile_neutral: 0.30
+  smile_on: 0.60
+  frontal_yaw: 0.12       # |yaw ratio| considered "facing the camera"
+  turn_yaw: 0.25          # |yaw ratio| needed for a head turn (~15-20 deg)
+  left_yaw_sign: 1        # +1: user's-left turn => positive yaw on un-mirrored frames (flip if wrong)
+
+enrollment:
+  center_frames: 10       # frontal good-quality frames scored by passive liveness
+  min_liveness: 0.70      # mean MiniFASNet score required (>= verify t_hi by default)
+  challenges: [blink, turn_left, turn_right]   # randomised order; add smile if wanted
+  references: 4           # sharpest+most frontal frames kept as reference set
+  duplicate_similarity: 95.0  # SearchFacesByImage hit on ANOTHER ID above this blocks enrollment
+
+stepup:
+  challenges: 1           # number of random challenges for REQUEST_VERIFICATION step-up
+  pool: [blink, turn_left, turn_right]
+
+storage:
+  bucket: auto            # auto = hid-liveness-<account id> (scripts/aws_resources.py); "" = no S3
+
+budget_ms: 2000

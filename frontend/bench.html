@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 24 24%27%3E%3Crect width=%2724%27 height=%2724%27 rx=%276%27 fill=%27%231f4fff%27/%3E%3Ccircle cx=%2712%27 cy=%2710%27 r=%273%27 fill=%27white%27/%3E%3Cpath d=%27M7 18c1-2.5 3-3.5 5-3.5s4 1 5 3.5%27 stroke=%27white%27 stroke-width=%272%27 fill=%27none%27/%3E%3C/svg%3E">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Liveness Test Bench</title>
+<link rel="stylesheet" href="/static/bench.css">
+</head>
+<body>
+<header>
+  <h1>Liveness test bench</h1>
+  <span id="conn" class="muted"></span>
+  <a href="/" class="muted">kiosk</a>
+</header>
+
+<main>
+  <!-- 1. camera -->
+  <section id="camera-panel" class="card">
+    <div class="row">
+      <label>Camera <select id="camera"></select></label>
+      <span id="camstats" class="muted mono"></span>
+    </div>
+    <div id="stage">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <div id="live-chip" class="chip hidden"></div>
+    </div>
+    <div id="cam-error" class="error hidden"></div>
+    <div id="chips" class="chips"></div>
+    <div class="row">
+      <label><input type="checkbox" id="live-toggle"> Live analysis</label>
+      <span id="live-stats" class="muted mono"></span>
+    </div>
+    <canvas id="sparkline" height="40"></canvas>
+  </section>
+
+  <!-- 2. controls -->
+  <section class="card">
+    <h2>Controls</h2>
+    <div class="row">
+      <input id="enroll-name" placeholder="name" maxlength="32" size="10">
+      <button id="enroll-btn">Enroll (3 captures)</button>
+      <label>verify as <select id="user"></select></label>
+    </div>
+    <div class="row">
+      <label>Label <select id="label"></select></label>
+      <label>Variant <select id="variant">
+        <option value="A">A: MiniFASNet</option>
+        <option value="B">B: + FFT/moire</option>
+        <option value="C">C: + motion</option>
+      </select></label>
+      <label><input type="checkbox" id="save-frames"> save frames to eval_data/&lt;label&gt;/</label>
+    </div>
+    <div class="row">
+      <button id="verify-btn" class="primary">Capture decision <kbd>Space</kbd></button>
+      <label>Auto-run <input id="auto-n" type="number" min="1" max="100" value="10" size="3"> attempts</label>
+      <button id="auto-btn">Start</button>
+      <button id="clip-btn">Record 3 s clip</button>
+    </div>
+    <div id="status" class="muted"></div>
+  </section>
+
+  <!-- 3. result -->
+  <section class="card">
+    <h2>Result</h2>
+    <div id="badge" class="badge">—</div>
+    <div id="reason" class="reason"></div>
+    <div class="kv mono" id="scores"></div>
+    <div id="latency"></div>
+  </section>
+
+  <!-- 9. step-up -->
+  <section class="card">
+    <h2>Step-up challenge</h2>
+    <div id="challenge" class="challenge muted">Appears after a REQUEST_VERIFICATION result. Same server-side engine as the kiosk.</div>
+  </section>
+
+  <!-- 4. debug -->
+  <section class="card">
+    <h2>Debug: model inputs</h2>
+    <div id="debug" class="debug"></div>
+    <div id="perframe" class="mono small"></div>
+  </section>
+
+  <!-- 5. thresholds -->
+  <section class="card">
+    <h2>Thresholds <span class="muted small">(re-decides all attempts in the browser)</span></h2>
+    <div id="sliders"></div>
+    <div class="row">
+      <label>Evaluate attempts as variant <select id="eval-variant">
+        <option value="">(as captured)</option><option>A</option><option>B</option><option>C</option>
+      </select></label>
+      <button id="save-config">Save to config.yaml</button>
+      <button id="reset-thr">Reset to server</button>
+    </div>
+  </section>
+
+  <!-- 7. metrics -->
+  <section class="card wide">
+    <h2>Live metrics <span class="muted small" id="metrics-note"></span></h2>
+    <div class="metrics">
+      <div id="metric-table"></div>
+      <div id="confusion"></div>
+      <div><h3>Fused liveness: genuine vs attacks</h3><canvas id="hist" width="360" height="160"></canvas></div>
+      <div><h3>Sweep T_hi: FRR vs attack accept</h3><canvas id="sweep" width="360" height="160"></canvas></div>
+    </div>
+  </section>
+
+  <!-- 6. attempts -->
+  <section class="card wide">
+    <h2>Attempts</h2>
+    <div class="row">
+      <label>Filter <select id="filter"><option value="">all</option></select></label>
+      <a id="export" href="/api/export.csv">Export CSV</a>
+      <button id="reload">Reload</button>
+    </div>
+    <div class="table-wrap"><table id="attempts"><thead><tr>
+      <th></th><th>time</th><th>label</th><th>var</th><th>minifas</th><th>moire</th><th>motion</th><th>sim</th>
+      <th>liveness</th><th>decision</th><th>expected</th><th>ms</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+  </section>
+</main>
+<canvas id="grab" class="hidden"></canvas>
+<script type="module" src="/static/bench.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+# Dev / model conversion only (never on the server)
+torch==2.15.0
+onnx==1.23.2
+onnxscript==0.7.2
+pytest==9.2.0
+httpx==0.28.1
+awscli==1.46.3

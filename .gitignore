@@ -9,6 +9,8 @@ credentials*
 # biometric data — never commit face images
 eval_data/
 enrolled/
+data/
+*.db
 captures/
 *.jpg
 *.jpeg
@@ -18,6 +20,7 @@ captures/
 # models (large binaries; fetched by script)
 models/*.onnx
 models/*.pth
+models/*.task
 
 # logs / outputs
 logs/
@@ -30,3 +33,4 @@ eval/out/
 __pycache__/
 *.pyc
 .pytest_cache/
+tests/.cache/

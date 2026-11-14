@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 24 24%27%3E%3Crect width=%2724%27 height=%2724%27 rx=%276%27 fill=%27%231f4fff%27/%3E%3Ccircle cx=%2712%27 cy=%2710%27 r=%273%27 fill=%27white%27/%3E%3Cpath d=%27M7 18c1-2.5 3-3.5 5-3.5s4 1 5 3.5%27 stroke=%27white%27 stroke-width=%272%27 fill=%27none%27/%3E%3C/svg%3E">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FaceGate Access</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/kiosk.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round">
+        <path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/>
+        <circle cx="12" cy="10" r="2.5"/><path d="M8 17c.8-2 2.3-3 4-3s3.2 1 4 3"/></svg>
+    </div>
+    <div>FaceGate<small>Liveness + identity</small></div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab" role="tab" data-tab="verify" aria-selected="true">Verify<kbd>1</kbd></button>
+    <button class="tab" role="tab" data-tab="enroll" aria-selected="false">Enroll<kbd>2</kbd></button>
+    <button class="tab" role="tab" data-tab="people" aria-selected="false">People<kbd>3</kbd></button>
+  </nav>
+  <div class="spacer"></div>
+  <div class="status-pill" title="Server connection · last round trip"><span id="conn-dot" class="dot"></span><span id="conn-text">connecting…</span></div>
+  <button id="sound-btn" class="icon-btn" title="Sound on/off (S)" aria-label="Toggle sound"></button>
+</header>
+
+<main id="main-layout" class="layout">
+  <!-- camera -->
+  <section id="cam-card" class="card cam-card">
+    <video id="video" autoplay playsinline muted></video>
+    <svg class="guide" viewBox="0 0 120 90" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+      <defs>
+        <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#3d6bff"/></linearGradient>
+      </defs>
+      <path class="shade" fill-rule="evenodd" d="M-200 -200H320V290H-200Z M40 44a20 27 0 1 0 40 0a20 27 0 1 0 -40 0Z"/>
+      <ellipse class="oval" cx="60" cy="44" rx="20" ry="27"/>
+      <ellipse id="ring" class="ring" cx="60" cy="44" rx="21.2" ry="28.2" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100" transform="rotate(-90 60 44)"/>
+    </svg>
+    <div class="cam-meta">
+      <span class="tag"><select id="camera" aria-label="Camera"></select></span>
+      <span id="live-tag" class="tag live hidden">LIVE</span>
+    </div>
+    <div id="prompt" class="prompt"><div class="glyph" id="prompt-glyph"></div><div class="big" id="prompt-big"></div><div class="sub" id="prompt-sub"></div></div>
+    <div id="coach" class="coach">Starting camera…</div>
+    <div id="cam-error" class="cam-error hidden"></div>
+    <div id="decision" class="decision" role="status" aria-live="assertive">
+      <div class="inner">
+        <div class="badge-icon" id="d-icon"></div>
+        <div class="d-title" id="d-title"></div>
+        <div class="d-name" id="d-name"></div>
+        <div class="d-reason" id="d-reason"></div>
+        <div class="d-stats" id="d-stats"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- right panel -->
+  <section class="card panel">
+    <!-- VERIFY -->
+    <div id="tab-verify" class="tabpane" style="display:grid;gap:18px">
+      <div><h2>Verify identity</h2><p class="muted" id="verify-sub">Enter or scan your badge ID, then look at the camera.</p></div>
+      <div class="seg" role="group" aria-label="Verification mode">
+        <button id="mode-claim" aria-pressed="true">Badge / ID (1:1)</button>
+        <button id="mode-open" aria-pressed="false">Face only (1:N)</button>
+      </div>
+      <div class="field" id="claim-field">
+        <label for="claim-id">Badge / employee ID</label>
+        <input id="claim-id" class="input" autocomplete="off" placeholder="e.g. E1024" maxlength="32">
+      </div>
+      <button id="verify-start" class="btn btn-primary">Start verification <span class="dim">↵</span></button>
+      <ol class="steps" id="verify-steps">
+        <li class="step" data-s="position"><span class="n">1</span><div>Position face<small>Centered, well lit, one person</small></div></li>
+        <li class="step" data-s="liveness"><span class="n">2</span><div>Liveness check<small>Passive anti-spoof on 5 frames</small></div></li>
+        <li class="step" data-s="identity"><span class="n">3</span><div>Identity match<small id="identity-sub">1:1 against the claimed ID</small></div></li>
+        <li class="step" data-s="decision"><span class="n">4</span><div>Decision<small>Within the 2 s budget</small></div></li>
+      </ol>
+      <div class="gauge" id="gauge">
+        <div class="gauge-top"><h3>Decision time</h3><span class="gauge-val mono" id="gauge-val">—</span></div>
+        <div class="gauge-track"><div class="gauge-fill" id="gauge-fill"></div><div class="gauge-tick" style="left:66.6%"></div></div>
+        <div class="gauge-legend"><span>0 s</span><span style="margin-left:auto;margin-right:calc(33.4% - 22px)">2 s budget</span><span>3 s</span></div>
+      </div>
+    </div>
+
+    <!-- ENROLL -->
+    <div id="tab-enroll" class="tabpane" style="display:none">
+      <div id="enroll-form" style="display:grid;gap:16px">
+        <div><h2>Enroll a person</h2><p class="muted">Liveness-checked enrollment: we confirm a live person before storing anything.</p></div>
+        <div class="field"><label for="e-name">Full name</label><input id="e-name" class="input" maxlength="64" autocomplete="off" placeholder="Jane Doe"></div>
+        <div class="field"><label for="e-id">Employee / badge ID</label><input id="e-id" class="input" maxlength="32" autocomplete="off" placeholder="E1024"></div>
+        <div class="field"><label for="e-role">Role <span class="dim">(optional)</span></label><input id="e-role" class="input" maxlength="64" autocomplete="off" placeholder="Engineering"></div>
+        <label class="check"><input type="checkbox" id="e-consent"><span>I agree to my face data being stored for access control. I can request deletion at any time.</span></label>
+        <div id="e-error" class="error-msg hidden"></div>
+        <button id="e-start" class="btn btn-primary" disabled>Begin face capture</button>
+        <p class="hint">Takes about 15 seconds: look straight at the camera, then follow three short prompts.</p>
+      </div>
+      <div id="enroll-run" style="display:none;gap:18px">
+        <div><h2 id="er-title">Capturing</h2><p class="muted" id="er-sub"></p></div>
+        <ol class="steps" id="enroll-steps">
+          <li class="step" data-s="center"><span class="n">1</span><div>Center your face<small>Quality check: one face, sharp, well lit, frontal</small></div></li>
+          <li class="step" data-s="liveness"><span class="n">2</span><div>Passive liveness<small>Anti-spoof model on 10 frames</small></div></li>
+          <li class="step" data-s="challenge"><span class="n">3</span><div>Quick challenges<small>Random order, verified on the server</small></div></li>
+          <li class="step" data-s="save"><span class="n">4</span><div>Save reference<small>Best frames · encrypted at rest</small></div></li>
+        </ol>
+        <div class="chips" id="er-chips"></div>
+        <div class="countdown mono" id="er-count"></div>
+        <button id="er-cancel" class="btn btn-ghost">Cancel <span class="dim">Esc</span></button>
+      </div>
+      <div id="enroll-done" class="success" style="display:none">
+        <img id="ed-photo" alt="Enrolled face">
+        <h2 id="ed-title"></h2>
+        <p class="muted" id="ed-sub"></p>
+        <button id="ed-again" class="btn btn-ghost">Enroll someone else</button>
+      </div>
+      <div id="enroll-fail" class="success" style="display:none">
+        <div class="badge-icon" style="background:var(--bad-bg);box-shadow:0 0 0 2px var(--bad);color:var(--bad)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M7 7l10 10M17 7L7 17"/></svg></div>
+        <h2>Enrollment not completed</h2>
+        <p id="ef-msg"></p>
+        <p class="hint" id="ef-detail"></p>
+        <button id="ef-retry" class="btn btn-primary">Try again</button>
+      </div>
+    </div>
+
+    <!-- PEOPLE -->
+    <div id="tab-people" class="tabpane" style="display:none;gap:16px">
+      <div style="display:flex;align-items:end;gap:12px;flex-wrap:wrap">
+        <div style="flex:1"><h2>People</h2><p class="muted" id="people-count"></p></div>
+        <input id="people-search" class="input" style="max-width:220px;padding:11px 14px;font-size:15px" placeholder="Search name or ID">
+      </div>
+      <div id="people-grid" class="people-grid"></div>
+    </div>
+  </section>
+</main>
+
+<dialog id="confirm">
+  <h2 style="font-size:18px">Delete <span id="confirm-name"></span>?</h2>
+  <p class="muted" style="margin-top:8px">This removes their face from the recognition index, their encrypted reference images and their record. This cannot be undone.</p>
+  <div class="row"><button class="btn btn-ghost" value="cancel" id="confirm-no">Cancel</button><button class="btn btn-danger" id="confirm-yes">Delete</button></div>
+</dialog>
+<canvas id="grab" hidden></canvas>
+<script type="module" src="/static/kiosk.js"></script>
+</body>
+</html>
