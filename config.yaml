@@ -7,6 +7,7 @@ thresholds:
   t_match_lo: 50.0  # similarity below this -> DENY (clearly a different person)
 
 # Liveness fusion. Variant A = MiniFASNet only; B = + FFT/moire cue; C = B + motion cue.
+# D = cloud-only (hid-gate rules), E = fused local + cloud (see `cloud:` below and backend/decision.py).
 fusion:
   default_variant: A
   moire_lo: 0.30    # moire raw score mapped linearly: <= lo -> 0 spoof evidence, >= hi -> 1
@@ -46,12 +47,14 @@ challenge:
   smile_on: 0.60
   frontal_yaw: 0.12       # |yaw ratio| considered "facing the camera"
   turn_yaw: 0.25          # |yaw ratio| needed for a head turn (~15-20 deg)
+  gesture_timeout_s: 15   # finger gesture is checked by the VLM ~once per second, so it gets longer
+  gesture_interval_s: 1.0
   left_yaw_sign: 1        # +1: user's-left turn => positive yaw on un-mirrored frames (flip if wrong)
 
 enrollment:
   center_frames: 10       # frontal good-quality frames scored by passive liveness
   min_liveness: 0.70      # mean MiniFASNet score required (>= verify t_hi by default)
-  challenges: [blink, turn_left, turn_right]   # randomised order; add smile if wanted
+  challenges: [blink, turn_left, turn_right, fingers]   # randomised order; fingers = VLM-counted gesture
   references: 4           # sharpest+most frontal frames kept as reference set
   duplicate_similarity: 95.0  # SearchFacesByImage hit on ANOTHER ID above this blocks enrollment
 
@@ -61,5 +64,26 @@ stepup:
 
 storage:
   bucket: auto            # auto = hid-liveness-<account id> (scripts/aws_resources.py); "" = no S3
+
+# Cloud signals ported from hid-gate (Bedrock vision model + Rekognition DetectLabels/DetectFaces).
+cloud:
+  enabled: true
+  model: us.anthropic.claude-haiku-4-5-20251001-v1:0   # A0: works; warm ~0.95-1.2 s, cold ~2.6 s
+  fallback_model: amazon.nova-lite-v1:0                # A0: works; ~0.7-1.1 s (NOT auto-switched)
+  budget_ms: 1400         # from cloud launch; unfinished signals = timeout -> E/D never ALLOW (fail closed)
+  keepalive_s: 20         # Bedrock text-only warm-up while idle (cold image call 2.6 s -> 1.4 s after warm-up)
+  vlm_live_min: 0.75      # VLM live >= this counts as live (hid-gate LIVE_MIN)
+  vlm_spoof_max: 0.30     # VLM live <= this counts as spoof -> DENY (hid-gate SPOOF_MAX)
+  d_sim_min: 80.0         # variant D: similarity below this = no match -> DENY (hid-gate search threshold)
+  d_sim_strong: 95.0      # variant D: similarity needed for ALLOW without a challenge (hid-gate SIM_STRONG)
+  rk_min_brightness: 25   # Rekognition DetectFaces quality (second opinion)
+  rk_min_sharpness: 20
+  rk_min_face_width: 0.15
+  gesture_same_min: 90.0  # finger gesture: CompareFaces(reference, gesture frame) must be >= this
+
+# Which variant the public kiosk uses. PROVISIONAL until held-out results exist: E is the fail-closed
+# fused variant (A alone accepts a clean digital photo; see CLAUDE.md). Change after Phase 3.
+kiosk:
+  variant: E
 
 budget_ms: 2000

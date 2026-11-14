@@ -29,7 +29,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Web
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .decision import ALLOW, DENY
+from .decision import ALLOW, DENY, VARIANTS
 from .people import ID_RE, People
 from .pipeline import ChallengeSession, Identify, LiveSession, Pipeline, face_thumb, stepup_decision
 from .store import DATA, EVAL, LABELS, ROOT, Store
@@ -61,7 +61,6 @@ def _bucket() -> str | None:
 
 
 PEOPLE = People(DATA_DIR / "people.db", PIPE.matcher, _bucket())
-VARIANTS = ("A", "B", "C")
 PIPE.reference_for_warmup = lambda: (PEOPLE.reference(PEOPLE.ids()[-1]) if PEOPLE.ids() else None)
 if PIPE.warm_kick is not None:
     PIPE.warm_kick.set()
@@ -185,16 +184,21 @@ def get_config() -> dict[str, Any]:
 
 @app.post("/api/config")
 def set_config(body: dict[str, Any]) -> dict[str, Any]:
-    th = body.get("thresholds", {})
+    th, cl = body.get("thresholds", {}), body.get("cloud", {})
     for k in ("t_lo", "t_hi", "t_match", "t_match_lo"):
         if k in th:
             CFG["thresholds"][k] = float(th[k])
+    for k in ("vlm_live_min", "vlm_spoof_max"):
+        if k in cl:
+            CFG["cloud"][k] = float(cl[k])
     if body.get("save"):
         text = CONFIG_PATH.read_text()
-        for k, v in CFG["thresholds"].items():  # targeted rewrite keeps the file's comments
+        items = list(CFG["thresholds"].items()) + [(k, CFG["cloud"][k]) for k in ("vlm_live_min", "vlm_spoof_max")]
+        for k, v in items:  # targeted rewrite keeps the file's comments
             text = re.sub(rf"(?m)^(\s+{k}:\s*)[0-9.]+", rf"\g<1>{v:g}", text, count=1)
         CONFIG_PATH.write_text(text)
-    return {"thresholds": CFG["thresholds"], "saved": bool(body.get("save"))}
+    return {"thresholds": CFG["thresholds"], "cloud": {k: CFG["cloud"][k] for k in ("vlm_live_min", "vlm_spoof_max")},
+            "saved": bool(body.get("save"))}
 
 
 # ---------------- people ----------------
@@ -372,8 +376,14 @@ def verify(files: list[UploadFile] = File(...), user: str | None = Form(None), p
     jpegs = [f.file.read() for f in files]
     if not 1 <= len(jpegs) <= 8:
         raise HTTPException(400, "send 1-8 frames")
+    if source == "kiosk":  # the public kiosk always uses the configured variant
+        variant = CFG["kiosk"]["variant"]
     identify, why = _identify(mode, person_id or user)
-    r = PIPE.verify(jpegs, identify=identify, variant=variant, no_identity_reason=why, name_of=PEOPLE.name)
+    # Bench/lab attempts always collect cloud signals so all variants are comparable on identical attempts;
+    # the kiosk only pays for them when its variant needs them.
+    cloud = source != "kiosk" or variant in ("D", "E")
+    r = PIPE.verify(jpegs, identify=identify, variant=variant, no_identity_reason=why, name_of=PEOPLE.name,
+                    cloud=cloud)
     r["raw"]["mode"] = mode
     thumb = r.pop("thumb")
     aid = _log_attempt(label=label, variant=variant, user=r["raw"].get("person_id"), source=source,
@@ -386,7 +396,7 @@ def verify(files: list[UploadFile] = File(...), user: str | None = Form(None), p
 def stepup_start(body: dict[str, Any]) -> dict[str, Any]:
     s = CFG["stepup"]
     kinds = random.sample(list(s["pool"]), int(s["challenges"]))
-    sess = ChallengeSession(PIPE, kinds=kinds, center_frames=0, min_liveness=0.0, purpose="stepup",
+    sess = ChallengeSession(PIPE, kinds=kinds, center_frames=0, min_liveness=0.0, purpose="stepup", pool=list(s["pool"]),
                             meta={"attempt_id": body.get("attempt_id"), "mode": body.get("mode", "claim"),
                                   "person_id": body.get("person_id"), "label": _label(body.get("label")),
                                   "t0": time.perf_counter()})

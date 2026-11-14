@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 
 from .challenge import ChallengeRunner, Landmarker
+from .cloud_signals import CloudSignals, _timed
 from .decision import ALLOW, DENY, decide, quality_failures
 from .matcher import RekognitionMatcher
 from .vision import Face, Vision, decode_jpeg, motion_score
@@ -103,6 +104,11 @@ class Pipeline:
         self.warm_kick = None
         if self.matcher is not None:
             self.warm_kick = self.matcher.keep_warm(lambda: self.reference_for_warmup(), m.get("keepalive_s", 120))
+        c = cfg.get("cloud") or {}
+        self.cloud: CloudSignals | None = None
+        if c.get("enabled") and self.matcher is not None:
+            self.cloud = CloudSignals(c, self.matcher.client)  # shares the warm Rekognition connection
+            self.cloud.keep_warm(c.get("keepalive_s", 20))
 
     @property
     def landmarker(self) -> Landmarker:
@@ -141,7 +147,9 @@ class Pipeline:
     # ---------- full verify (kiosk + bench) ----------
     def verify(self, jpegs: list[bytes], *, identify: Identify | None, variant: str,
                no_identity_reason: str = "no enrolled reference",
-               name_of: Callable[[str], str] = lambda pid: pid) -> dict[str, Any]:
+               name_of: Callable[[str], str] = lambda pid: pid, cloud: bool = False) -> dict[str, Any]:
+        """cloud=True also collects the cloud signals (needed by variants D/E; the lab always collects them
+        so every variant can be compared on identical attempts)."""
         t_all = time.perf_counter()
         tm: dict[str, float] = {"decode": 0.0, "detect": 0.0, "quality": 0.0, "liveness": 0.0, "cues": 0.0}
 
@@ -153,9 +161,14 @@ class Pipeline:
         with_face = [i for i, f in enumerate(frames) if f.face]
         best = max(with_face, key=lambda i: frames[i].quality["blur"]) if with_face else None  # type: ignore[index]
 
-        # Stage 2: identity (network-bound) runs in parallel with liveness.
+        # Stage 2: identity and cloud signals (network-bound) run in parallel with local liveness.
         t_match = time.perf_counter()
-        fut = self.match_async(identify, jpeg(frames[best].img)) if best is not None else None
+        probe = jpeg(frames[best].img) if best is not None else None
+        fut = self.match_async(identify, probe) if probe is not None else None
+        cfuts, deadline = None, 0.0
+        if cloud and self.cloud is not None and probe is not None:
+            cfuts = self.cloud.start(probe)
+            deadline = time.perf_counter() + self.cfg["cloud"]["budget_ms"] / 1000
 
         crops: dict[str, np.ndarray] = {}
         per_frame: list[dict[str, Any]] = []
@@ -180,6 +193,13 @@ class Pipeline:
         if fut is not None:
             sim, err, who = fut.result()
         tm["match"] = _ms(t_match)  # wall time from launch; overlaps liveness + cues
+        csig = None
+        if cfuts is not None:
+            t0 = time.perf_counter()
+            csig = self.cloud.finish(cfuts, deadline)  # type: ignore[union-attr]
+            tm["cloud_wait"] = _ms(t0)  # extra wall time spent waiting for cloud after local+identity
+            for k, v in csig["ms"].items():
+                tm[f"cloud_{k}"] = v if v is not None else self.cfg["cloud"]["budget_ms"]
 
         t0 = time.perf_counter()
         lives = [p["liveness"] for p in per_frame if "liveness" in p]
@@ -190,7 +210,11 @@ class Pipeline:
                "moire": float(np.mean(moires)) if moires else None,
                "motion": motion, "similarity": sim, "match_error": err,
                "user": name_of(who) if who else None, "person_id": who,
-               "n_frames": len(jpegs), "frames_with_face": len(with_face)}
+               "n_frames": len(jpegs), "frames_with_face": len(with_face),
+               "cloud": csig, "face_box": None}
+        if best is not None:
+            x, y, w, h = frames[best].box_norm()  # type: ignore[misc]
+            raw["face_box"] = {"Left": x, "Top": y, "Width": w, "Height": h}
         result = decide(raw, self.cfg, variant)
         tm["decision"] = _ms(t0)
         tm = {k: round(v, 1) for k, v in tm.items()}
@@ -273,18 +297,27 @@ class ChallengeSession:
             -> 'passed' | 'failed'. Frames live only in memory and are dropped on failure."""
 
     def __init__(self, pipe: Pipeline, *, kinds: list[str], center_frames: int, min_liveness: float,
-                 purpose: str, meta: dict[str, Any] | None = None, rng: random.Random | None = None) -> None:
+                 purpose: str, meta: dict[str, Any] | None = None, rng: random.Random | None = None,
+                 pool: list[str] | None = None) -> None:
         self.p, self.purpose, self.meta = pipe, purpose, meta or {}
-        self.cc = pipe.cfg["challenge"]
+        cl = pipe.cfg.get("cloud") or {}
+        self.cc = {**pipe.cfg["challenge"], "vlm_spoof_max": cl.get("vlm_spoof_max", 0.30),
+                   "gesture_same_min": cl.get("gesture_same_min", 90.0)}
+        if pipe.cloud is None:  # the finger gesture needs the vision model; never offer an unverifiable challenge
+            kinds = [k for k in kinds if k != "fingers"]
         self.kinds, self.need, self.min_live, self.rng = kinds, center_frames, min_liveness, rng
+        self.pool = [k for k in (pool or kinds) if pipe.cloud is not None or k != "fingers"]
+        self.g_fut: tuple[Future, Future] | None = None
+        self.g_last = 0.0
+        self.gesture_log: list[dict[str, Any]] = []
         self.phase = "center" if center_frames > 0 else "challenge"
-        self.runner = ChallengeRunner(kinds, self.cc, rng) if self.phase == "challenge" else None
+        self.runner = ChallengeRunner(kinds, self.cc, rng, self.pool) if self.phase == "challenge" else None
         self.good: list[tuple[bytes, FrameInfo]] = []  # center-phase frames (candidate references)
         self.live_scores: list[float] = []
         self.challenge_live: list[float] = []
         self.reason = ""
         self.created = time.time()
-        self.stage_ms: dict[str, list[float]] = {"analyze": [], "landmarks": []}
+        self.stage_ms: dict[str, list[float]] = {"analyze": [], "landmarks": [], "gesture": []}
         self.challenge_jpeg: bytes | None = None
 
     def frame(self, data: bytes) -> dict[str, Any]:
@@ -307,7 +340,7 @@ class ChallengeSession:
                 if mean < self.min_live:
                     return self._fail(f"passive liveness {mean:.2f} < {self.min_live:.2f}")
                 self.phase = "challenge"
-                self.runner = ChallengeRunner(self.kinds, self.cc, self.rng)
+                self.runner = ChallengeRunner(self.kinds, self.cc, self.rng, self.pool)
             return self.state("Hold still…" if ok else tip, f)
         # challenge phase
         sig = None
@@ -320,6 +353,9 @@ class ChallengeSession:
             self.challenge_live.append(f.liveness)  # type: ignore[arg-type]
             if self.challenge_jpeg is None and not f.fails and frontal:
                 self.challenge_jpeg = data  # a frontal frame from the challenge, for the identity check
+            g = self._gesture(data)
+            if g is not None:
+                sig = {**(sig or {}), "gesture": g}
         st = self.runner.update(sig, f.quality["yaw"] if f.quality else None)  # type: ignore[union-attr]
         recent = self.challenge_live[-10:]
         if len(recent) >= 5 and float(np.mean(recent)) < self.p.cfg["thresholds"]["t_lo"]:
@@ -329,6 +365,31 @@ class ChallengeSession:
         if st["status"] == "passed":
             self.phase = "passed"
         return self.state(st["prompt"] or tip, f, signals=sig)
+
+    def _gesture(self, data: bytes) -> dict[str, Any] | None:
+        """Finger challenge: at most one (VLM count + CompareFaces same-person) check in flight, about once
+        per gesture_interval_s. Returns a completed result, else None. Errors/timeouts never pass."""
+        if self.runner is None or self.runner.cur.kind != "fingers" or self.p.cloud is None:
+            return None
+        if self.g_fut is not None:
+            if not (self.g_fut[0].done() and self.g_fut[1].done()):
+                return None
+            (gv, gms, gerr), (same, sms, serr) = self.g_fut[0].result(), self.g_fut[1].result()
+            self.g_fut = None
+            self.stage_ms["gesture"].append(max(gms or 0.0, sms or 0.0))
+            entry = {"fingers": gv["fingers"] if gv else None, "live": gv["live"] if gv else None,
+                     "same": same, "error": gerr or serr, "target": self.runner.cur.target}
+            self.gesture_log.append(entry)
+            return None if (gerr or serr) else {**gv, "same": same}
+        if time.time() - self.g_last >= self.cc["gesture_interval_s"]:
+            ref = self.best_references(1)[0][0] if self.good else self.challenge_jpeg
+            if ref is None or self.p.matcher is None:
+                return None
+            self.g_last = time.time()
+            m = self.p.matcher
+            self.g_fut = (self.p.cloud.pool.submit(_timed, lambda: self.p.cloud.gesture(data)),  # type: ignore[union-attr]
+                          self.p.cloud.pool.submit(_timed, lambda: m.compare(ref, data)[0] or 0.0))  # type: ignore[union-attr]
+        return None
 
     def _fail(self, reason: str) -> dict[str, Any]:
         self.phase, self.reason = "failed", reason
@@ -356,7 +417,9 @@ class ChallengeSession:
         if f is not None:
             out.update(box=f.box_norm(), quality=f.quality, liveness=f.liveness, n_faces=len(f.faces))
         if signals:
-            out["signals"] = {k: round(v, 2) for k, v in signals.items()}
+            out["signals"] = {k: round(v, 2) for k, v in signals.items() if isinstance(v, (int, float))}
+        if self.gesture_log:
+            out["gesture_last"] = self.gesture_log[-1]
         return out
 
 
