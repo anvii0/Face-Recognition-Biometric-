@@ -102,7 +102,11 @@ function setGauge(ms) {
 // Friendly reason text for the kiosk (full technical reason stays in logs / bench).
 function friendly(r) {
   const s = r.reason || "";
-  if (/screen replay/.test(s)) return "Screen replay suspected";
+  if (/screen replay|screen suspected/.test(s)) return "Screen replay suspected";
+  if (/printed_photo suspected/.test(s)) return "Printed photo suspected";
+  if (/mask suspected/.test(s)) return "Mask suspected";
+  if (/spoof suspected/.test(s)) return "We couldn't confirm a live person";
+  if (/cloud check unavailable/.test(s)) return "Taking a little longer than usual — one quick extra check";
   if (/presentation attack|natural face motion/.test(s)) return "We couldn't confirm a live person";
   if (/does not match/.test(s)) return "Face does not match this ID";
   if (/too dark/.test(s)) return "Too dark — let's do a quick extra check";

@@ -1,5 +1,5 @@
 // Test bench: camera, live analysis, capture/verify, re-decision with sliders, metrics.
-import { decide, ALLOW, DENY, STEP_UP } from "./decision.js";
+import { decide, deviceOverFace, ALLOW, DENY, STEP_UP, VARIANTS } from "./decision.js";
 import { afterPaint, captureFrames, grabJpeg, listCameras, nextFrame, openCamera, rememberedCamera } from "./camera.js";
 
 const $ = (id) => document.getElementById(id);
@@ -8,7 +8,7 @@ const ATTACKS = ["photo", "screen", "video", "mask"];
 const STAGES = [ // [timing key, label, colour]
   ["decode", "decode", "#718096"], ["detect", "detect", "#2b6cb0"], ["quality", "quality", "#319795"],
   ["liveness", "liveness", "#805ad5"], ["cues", "cues", "#d53f8c"], ["match_wait", "Rekognition (wait)", "#dd6b20"],
-  ["decision", "decision", "#38a169"], ["network", "network+render", "#a0aec0"],
+  ["cloud_wait", "cloud signals (wait)", "#0e7490"], ["decision", "decision", "#38a169"], ["network", "network+render", "#a0aec0"],
 ];
 
 const S = {
@@ -34,12 +34,21 @@ function quantile(xs, q) {
 function wilson(k, n, z = 1.96) { // 95% Wilson score interval
   if (!n) return [null, null];
   const p = k / n, d = 1 + z * z / n, c = p + z * z / (2 * n), m = z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n));
-  return [(c - m) / d, (c + m) / d];
+  return [Math.max(0, (c - m) / d), Math.min(1, (c + m) / d)];
 }
+const TH_KEYS = ["t_lo", "t_hi", "t_match", "t_match_lo"], CLOUD_KEYS = ["vlm_live_min", "vlm_spoof_max"];
 function currentCfg() {
-  const th = {};
-  for (const k of ["t_lo", "t_hi", "t_match", "t_match_lo"]) th[k] = Number($("s-" + k).value);
-  return { ...S.cfg, thresholds: th };
+  const th = {}, cloud = { ...S.cfg.cloud };
+  for (const k of TH_KEYS) th[k] = Number($("s-" + k).value);
+  for (const k of CLOUD_KEYS) cloud[k] = Number($("s-" + k).value);
+  return { ...S.cfg, thresholds: th, cloud };
+}
+// Estimated decision time of an attempt under variant v: A/B/C would not have waited for the cloud signals.
+function latencyFor(a, v) {
+  const t = a.timings;
+  if (t.total == null) return null;
+  const server = ["D", "E"].includes(v) ? t.total : t.total - (t.cloud_wait || 0);
+  return t.client_e2e != null ? t.client_e2e - t.total + server : server;
 }
 const evalVariant = (a) => $("eval-variant").value || a.variant;
 // Only verify-type attempts carry the raw scores decide() needs; enroll/step-up rows keep their stored outcome.
@@ -267,6 +276,7 @@ function renderResult(r, e2e) {
     ["moire", fmt(raw.moire, 3)], ["motion", fmt(raw.motion, 4)], ["similarity", fmt(raw.similarity, 1)],
     ["match error", raw.match_error || "—"], ["frames w/ face", `${raw.frames_with_face}/${raw.n_frames}`],
     ["variant", r.variant], ["decision time", e2e == null ? "…" : `${e2e.toFixed(0)} ms (capture end → shown)`],
+    ...cloudRows(raw),
   ].map(([k, v]) => `<span class="muted">${k}</span><span>${v}</span>`).join("");
   renderLatency(r.timings, e2e);
   renderChips(raw.quality);
@@ -274,6 +284,23 @@ function renderResult(r, e2e) {
     `<figure><img src="data:image/png;base64,${b64}"><figcaption>${k === "fft" ? "FFT log-magnitude" : k.replace("minifas_", "MiniFASNet crop ×")}</figcaption></figure>`).join("");
   $("perframe").innerHTML = "per-frame liveness: " + r.per_frame.map((p, i) =>
     `#${i} ${p.n_faces ? fmt(p.liveness) + " / moire " + fmt(p.moire, 3) : "no face"}`).join(" · ");
+}
+
+function esc(x) { return String(x).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function cloudRows(raw) {
+  const c = raw.cloud;
+  if (!c) return [["cloud signals", "not collected"]];
+  const err = c.errors || {}, v = c.vlm, rk = (c.faces || [])[0];
+  const over = deviceOverFace(raw);
+  return [
+    ["VLM live", v ? `${fmt(v.live)} · ${esc(v.attack)}` : `<span class="dec-DENY">${err.vlm || "missing"}</span>`],
+    ["VLM evidence", v ? `“${esc(v.evidence)}”` : "—"],
+    ["devices", c.devices == null ? `<span class="dec-DENY">${err.labels || "missing"}</span>`
+      : c.devices.length ? c.devices.map((d) => `${esc(d.name)} ${fmt(d.conf, 0)}%`).join(", ") + (over ? ` — <b class="dec-DENY">${esc(over.name)} over face</b>` : " (not over face)") : "none"],
+    ["weak hints", (c.weak || []).join(", ") || "none"],
+    ["Rekognition face", rk ? `bright ${fmt(rk.brightness, 0)} · sharp ${fmt(rk.sharpness, 0)} · occluded ${rk.occluded} · yaw ${fmt(rk.yaw, 0)}°`
+      : c.faces == null ? `<span class="dec-DENY">${err.faces || "missing"}</span>` : `${(c.faces || []).length} faces`],
+  ];
 }
 
 function renderLatency(t, e2e) {
@@ -286,15 +313,31 @@ function renderLatency(t, e2e) {
       <div class="budget" style="left:${(100 * budget / scale).toFixed(2)}%" title="${budget} ms budget"></div>
     </div>
     <div class="legend">${STAGES.map(([k, l, c]) => `<span><i style="background:${c}"></i>${l} ${fmt(seg[k], 0)}</span>`).join("")}
-      <span>· server total ${fmt(t.total, 0)} ms · Rekognition ${fmt(t.match, 0)} ms (parallel)</span></div>`;
+      <span>· server total ${fmt(t.total, 0)} ms · Rekognition ${fmt(t.match, 0)} ms (parallel)</span></div>
+    ${parallelBars(t, scale, budget)}`;
+}
+// Network-bound signals all start together after stage 1 and run in parallel; one bar each.
+function parallelBars(t, scale, budget) {
+  const start = (t.decode || 0) + (t.detect || 0) + (t.quality || 0);
+  const cloudBudget = S.cfg.cloud?.budget_ms;
+  const rows = [["identity (CompareFaces/Search)", t.match, "#dd6b20"], ["local liveness + cues", (t.liveness || 0) + (t.cues || 0), "#805ad5"],
+    ["VLM (Bedrock)", t.cloud_vlm, "#0e7490"], ["DetectLabels", t.cloud_labels, "#2f855a"], ["DetectFaces", t.cloud_faces, "#4a5568"]];
+  return `<div class="small muted" style="margin-top:8px">parallel signals (start at ${fmt(start, 0)} ms; cloud budget ${cloudBudget} ms)</div>` +
+    rows.filter(([, v]) => v != null).map(([l, v, c]) => `
+    <div class="pbar"><span class="pl">${l}</span><div class="pt">
+      <span style="left:${(100 * start / scale).toFixed(2)}%;width:${(100 * v / scale).toFixed(2)}%;background:${c}"></span>
+      <i style="left:${(100 * budget / scale).toFixed(2)}%"></i>${cloudBudget ? `<i class="cb" style="left:${(100 * (start + cloudBudget) / scale).toFixed(2)}%"></i>` : ""}
+    </div><span class="mono pv ${v >= (cloudBudget || 1e9) ? "dec-DENY" : ""}">${fmt(v, 0)}</span></div>`).join("");
 }
 
 // ---------------- thresholds ----------------
 function buildSliders() {
   const th = S.cfg.thresholds;
-  const spec = [["t_lo", 0, 1, 0.01], ["t_hi", 0, 1, 0.01], ["t_match", 0, 100, 0.5], ["t_match_lo", 0, 100, 0.5]];
+  const spec = [["t_lo", 0, 1, 0.01], ["t_hi", 0, 1, 0.01], ["t_match", 0, 100, 0.5], ["t_match_lo", 0, 100, 0.5],
+    ["vlm_live_min", 0, 1, 0.01], ["vlm_spoof_max", 0, 1, 0.01]];
+  const val = (k) => (CLOUD_KEYS.includes(k) ? S.cfg.cloud[k] : th[k]);
   $("sliders").innerHTML = spec.map(([k, lo, hi, st]) =>
-    `<div class="slider"><label for="s-${k}">${k.toUpperCase()}</label><input type="range" id="s-${k}" min="${lo}" max="${hi}" step="${st}" value="${th[k]}"><span id="v-${k}" class="mono">${th[k]}</span></div>`).join("");
+    `<div class="slider"><label for="s-${k}">${k.toUpperCase()}${CLOUD_KEYS.includes(k) ? " <span class='muted small'>(D/E)</span>" : ""}</label><input type="range" id="s-${k}" min="${lo}" max="${hi}" step="${st}" value="${val(k)}"><span id="v-${k}" class="mono">${val(k)}</span></div>`).join("");
   for (const [k] of spec) $("s-" + k).oninput = () => { $("v-" + k).textContent = $("s-" + k).value; renderAll(); };
 }
 function setSliders(th) { for (const k in th) { $("s-" + k).value = th[k]; $("v-" + k).textContent = th[k]; } renderAll(); }
@@ -314,7 +357,8 @@ function renderTable() {
       <td>${a.has_thumb === false ? `<span class="muted small">${a.source}</span>` : `<img loading="lazy" src="/api/attempts/${a.id}/thumb.jpg" alt="">`}</td>
       <td>${new Date(a.ts * 1000).toLocaleTimeString()}</td><td>${a.label}</td><td>${evalVariant(a)}</td>
       <td class="num">${fmt(a.raw.minifas)}</td><td class="num">${fmt(a.raw.moire, 3)}</td><td class="num">${fmt(a.raw.motion, 4)}</td>
-      <td class="num">${fmt(a.raw.similarity, 1)}</td><td class="num">${fmt(d.liveness)}</td>
+      <td class="num">${fmt(a.raw.similarity, 1)}</td><td class="num" title="${esc(a.raw.cloud?.vlm?.evidence || a.raw.cloud?.errors?.vlm || "")}">${a.raw.cloud ? (a.raw.cloud.vlm ? fmt(a.raw.cloud.vlm.live) : `<span class="dec-DENY">${a.raw.cloud.errors?.vlm || "—"}</span>`) : "—"}</td>
+      <td>${a.raw.cloud ? (deviceOverFace(a.raw) ? `<b class="dec-DENY">${esc(deviceOverFace(a.raw).name)}</b>` : (a.raw.cloud.devices || []).length ? "off-face" : "") : "—"}</td><td class="num">${fmt(d.liveness)}</td>
       <td class="dec-${d.decision}">${d.decision === STEP_UP ? "STEP-UP" : d.decision}</td><td>${exp ? (exp === ALLOW ? "ALLOW" : "not ALLOW") : "—"}</td>
       <td class="num">${fmt(latencyOf(a), 0)}</td><td><button data-del="${a.id}" title="delete">✕</button></td></tr>`;
   }).join("");
@@ -349,9 +393,35 @@ function renderMetrics() {
   $("confusion").innerHTML = `<h3>Confusion (rows = label)</h3><table><tr><th></th><th>ALLOW</th><th>STEP-UP</th><th>DENY</th><th>n</th></tr>${
     labels.map((l) => { const xs = by(l); return `<tr><td>${l}</td>${[ALLOW, STEP_UP, DENY].map((d) => `<td class="num">${cnt(xs, (x) => x.d === d)}</td>`).join("")}<td class="num">${xs.length}</td></tr>`; }).join("")}</table>`;
 
+  renderVariantCompare(labelled, cfg);
   const live = (xs) => xs.map((x) => redecide(x.a, cfg).liveness).filter((v) => v != null);
   drawHist($("hist"), live(gen), live(atk), cfg.thresholds);
   drawSweep($("sweep"), gen.map((x) => x.a), atk.map((x) => x.a), cfg);
+}
+
+// Every variant re-decided on the SAME labelled attempts, at the current slider thresholds.
+function renderVariantCompare(labelled, cfg) {
+  const cell = (k, n) => {
+    if (!n) return '<td class="muted">n=0</td>';
+    const [lo, hi] = wilson(k, n);
+    return `<td class="num">${pct(k / n)}<div class="muted small">[${pct(lo)}–${pct(hi)}] ${k}/${n}</div></td>`;
+  };
+  const per = Object.fromEntries(VARIANTS.map((v) => [v, labelled.map((a) => ({ a, d: decide({ ...a.raw }, cfg, v).decision }))]));
+  const rows = [
+    ["FRR (genuine not ALLOWed)", (xs) => xs.filter((x) => x.a.label === "genuine"), (x) => x.d !== ALLOW],
+    ["FAR (attacks + impostors ALLOWed)", (xs) => xs.filter((x) => x.a.label !== "genuine"), (x) => x.d === ALLOW],
+    ...ATTACKS.map((l) => [`${l}: detection (not ALLOWed)`, (xs) => xs.filter((x) => x.a.label === l), (x) => x.d !== ALLOW]),
+    ["impostor: rejected (not ALLOWed)", (xs) => xs.filter((x) => x.a.label === "impostor"), (x) => x.d !== ALLOW],
+  ];
+  const noCloud = labelled.filter((a) => !a.raw.cloud).length;
+  let html = `<h3>Variants side by side (same ${labelled.length} labelled attempts)</h3><table><tr><th>metric</th>${VARIANTS.map((v) => `<th>${v}</th>`).join("")}</tr>`;
+  for (const [name, sel, hit] of rows)
+    html += `<tr><td>${name}</td>${VARIANTS.map((v) => { const xs = sel(per[v]); return cell(xs.filter(hit).length, xs.length); }).join("")}</tr>`;
+  html += `<tr><td>decision time p50 / p95 (est.)</td>${VARIANTS.map((v) => {
+    const l = labelled.map((a) => latencyFor(a, v)).filter((x) => x != null);
+    return `<td class="num">${fmt(quantile(l, 0.5), 0)} / ${fmt(quantile(l, 0.95), 0)}<div class="muted small">n=${l.length}</div></td>`; }).join("")}</tr></table>
+    <p class="muted small">Times are estimates for A/B/C (measured time minus the extra wait for cloud signals). ${noCloud ? `${noCloud} attempt(s) have no cloud signals, so D/E step them up (fail closed).` : ""}</p>`;
+  $("variant-compare").innerHTML = html;
 }
 
 function canvasCtx(c) {
@@ -426,7 +496,7 @@ async function init() {
   try {
     S.cfg = await api("/api/config");
   } catch (e) { $("cam-error").textContent = e.message; $("cam-error").classList.remove("hidden"); return; }
-  S.serverThresholds = { ...S.cfg.thresholds };
+  S.serverThresholds = { ...S.cfg.thresholds, vlm_live_min: S.cfg.cloud.vlm_live_min, vlm_spoof_max: S.cfg.cloud.vlm_spoof_max };
   $("conn").textContent = `server ok · budget ${S.cfg.budget_ms} ms`;
   $("label").innerHTML = S.cfg.labels.map((l) => `<option>${l}</option>`).join("");
   $("filter").innerHTML += S.cfg.labels.map((l) => `<option>${l}</option>`).join("");
@@ -451,8 +521,8 @@ async function init() {
   $("reset-thr").onclick = () => setSliders(S.serverThresholds);
   $("save-config").onclick = async () => {
     const r = await api("/api/config", { method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ thresholds: currentCfg().thresholds, save: true }) });
-    S.serverThresholds = { ...r.thresholds }; S.cfg.thresholds = { ...r.thresholds };
+      body: JSON.stringify({ thresholds: currentCfg().thresholds, cloud: currentCfg().cloud, save: true }) });
+    S.serverThresholds = { ...r.thresholds, ...r.cloud }; S.cfg.thresholds = { ...r.thresholds }; Object.assign(S.cfg.cloud, r.cloud);
     status("saved thresholds to config.yaml");
   };
   $("attempts").onclick = async (e) => {

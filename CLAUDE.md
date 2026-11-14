@@ -10,8 +10,13 @@ APCER/BPCER with n + 95% Wilson CIs, latency p50/p95 — never invented numbers.
 - `backend/vision.py` YuNet detection (+5 landmarks), quality metrics, MiniFASNet x2 ONNX ensemble
   (upstream crop logic; YuNet box squared to mimic RetinaFace), FFT/moire cue, landmark motion cue.
 - `backend/decision.py` pure decide(raw, cfg, variant); mirrored in `frontend/decision.js`
-  (parity test). Variants: A MiniFASNet, B +moire, C +motion. Every decision has a human reason.
-- `backend/challenge.py` blink/smile (MediaPipe Face Landmarker blendshapes) + head turn (YuNet yaw), server-side.
+  (parity test, 1500 random cases). Variants: A MiniFASNet, B +moire, C +motion, D cloud-only (hid-gate rules),
+  E fused local+cloud, fail closed. Every decision has a human reason (D/E quote the VLM evidence).
+- `backend/cloud_signals.py` (ported from teammate's hid-gate, read-only source ~/hid-gate-src/hid-gate-main):
+  Bedrock Converse VLM liveness (strict JSON; parse failure = timeout), DetectLabels devices/weak hints,
+  DetectFaces extras, finger-count gesture; parallel under `cloud.budget_ms`; Bedrock keep-warm.
+- `backend/challenge.py` blink/smile (MediaPipe blendshapes), head turn (YuNet yaw), fingers 1-5 (VLM count +
+  CompareFaces same-person, async ~1/s, 15 s timeout), all server-side. Retries draw from the configured pool.
 - `backend/pipeline.py` one pipeline: analyze() per frame; verify() (identity runs in parallel with
   liveness); LiveSession (WS); ChallengeSession (shared by gated enrollment + verify step-up).
 - `backend/matcher.py` Rekognition CompareFaces (1:1), SearchFacesByImage (1:N, duplicate check),
@@ -23,6 +28,9 @@ APCER/BPCER with n + 95% Wilson CIs, latency p50/p95 — never invented numbers.
 - Frontend (no build): `/` kiosk (index.html, kiosk.js, kiosk.css — hand CSS, no CDN JS), `/bench`
   (bench.html/js/css), shared `camera.js`, `decision.js`.
 - AWS data: bucket `hid-liveness-<acct>`, collection `hid-liveness-faces` via `scripts/aws_resources.py`.
+  NEVER touch collection `hid-gate` (teammate's, same account). Our reset/teardown only touch our resources.
+- Kiosk variant = `kiosk.variant` in config.yaml (provisionally E). Lab attempts always collect cloud signals.
+- Docs: `docs/architecture.md` (components, signals, variants, latency budget, fail-closed).
 
 ## Environment
 - Region us-east-1 ONLY (IAM does NOT block other regions — discipline is on us). Temporary creds from env;
@@ -42,11 +50,20 @@ APCER/BPCER with n + 95% Wilson CIs, latency p50/p95 — never invented numbers.
 - Rekognition real-pair check: `.venv/bin/python scripts/compare_faces.py a.jpg b.jpg [other.jpg]`
 - Preflight: `.venv/bin/python scripts/preflight.py`
 
+## Part A (hid-gate merge) findings
+- Bedrock Converse works: Haiku 4.5 profile `us.anthropic.claude-haiku-4-5-20251001-v1:0` warm ~0.95-1.2 s,
+  cold 2.6 s (1.4 s after text warm-up); Nova Lite ~0.7-1.1 s. Haiku wraps JSON in ```json fences (handled).
+- On the NASA sample: MiniFASNet 0.82-0.96 (live), Haiku live 0.05-0.15 "printed_photo", Nova 0.95. Haiku's
+  evidence text can be hallucinated ("visible photo edges" on a full-frame image) — evidence is model output.
+- Parallel cloud+local server wall ~0.89-1.07 s warm (VLM is the critical path); E end-to-end ~1.0 s on bench.
+- First CompareFaces right after an enrollment can still be cold (~2.3 s): do one throwaway verify after enrolling.
+
 ## Current phase
 Phase 1 (+1b bench, +1c kiosk) built and verified with a public-domain sample + Chrome fake camera.
 WAITING ON USER: real webcam tests (enroll self, printed-photo & phone-screen enrollment attempts, verify
 self ALLOW, verify spoof DENY), real face pair for CompareFaces, confirm turn-left/right sign on real camera.
-Next: Phase 2 hardening (step-up already exists), Phase 3 eval harness + report.py, Phase 4 deploy.
+Part A (hid-gate signals, variants D/E) DONE. Part B (Kiosk/Admin/Lab split, staff PIN, split stores) next.
+Then Phase 3 eval harness + report.py, Phase 4 deploy.
 
 ## Measured so far (sample image, laptop, localhost) — not eval numbers
 - Server verify total 360-650 ms warm (Rekognition 320-600 ms dominates; runs parallel to liveness ~15 ms/frame).
